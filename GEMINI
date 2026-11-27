@@ -1,0 +1,706 @@
+-- Load Rayfield UI Library
+local Rayfield = loadstring(game:HttpGet("https://sirius.menu/rayfield"))()
+
+local HttpService = game:GetService("HttpService")
+local CoreGui = game:GetService("CoreGui")
+local SoundService = game:GetService("SoundService")
+local Lighting = game:GetService("Lighting")
+local Players = game:GetService("Players")
+
+-- Main Window (Super Black)
+local Window = Rayfield:CreateWindow({
+	Name = "GEMINI (AI DRUMS)",
+	Icon = 0,
+	LoadingTitle = "GEMINI (AI DRUMS)",
+	LoadingSubtitle = "Super Black Edition",
+	Theme = "Dark",
+	DisableRayfieldPrompts = true,
+	DisableBuildWarnings = true,
+	ConfigurationSaving = {
+		Enabled = false,
+		FolderName = "GeminiAIDrumsRayfield",
+		FileName = "Config"
+	},
+	KeySystem = false
+})
+
+-- Apply Super Black styling across Rayfield elements
+local function applySuperBlackTheme()
+	local pureBlack = Color3.fromRGB(0, 0, 0)
+	local nearBlack = Color3.fromRGB(10, 10, 10)
+	local darkCard = Color3.fromRGB(16, 16, 16)
+
+	local roots = { CoreGui }
+	pcall(function()
+		if gethui then
+			table.insert(roots, gethui())
+		end
+	end)
+
+	for _, root in ipairs(roots) do
+		for _, obj in ipairs(root:GetDescendants()) do
+			if obj.Name == "Rayfield" then
+				for _, desc in ipairs(obj:GetDescendants()) do
+					if desc:IsA("UIStroke") then
+						desc.Enabled = false
+						desc.Thickness = 0
+					elseif desc:IsA("Frame") then
+						if desc.Name == "Topbar" then
+							desc.BackgroundColor3 = pureBlack
+						elseif desc.Name == "Main" or desc.Name == "Elements" or desc.Name == "Content" then
+							desc.BackgroundColor3 = pureBlack
+						else
+							desc.BackgroundColor3 = darkCard
+						end
+					elseif desc:IsA("ScrollingFrame") then
+						desc.BackgroundColor3 = pureBlack
+					elseif desc:IsA("TextBox") then
+						desc.BackgroundColor3 = nearBlack
+						desc.TextColor3 = Color3.fromRGB(255, 255, 255)
+						desc.ClearTextOnFocus = false
+					end
+				end
+			end
+		end
+	end
+end
+
+-- ==========================================
+-- MAIN TAB: GEMINI (AI DRUMS)
+-- ==========================================
+local GeminiTab = Window:CreateTab("GEMINI (AI DRUMS)", 0)
+
+GeminiTab:CreateSection("1. API Key & Model Setup")
+
+-- Detect executor HTTP function safely
+local function getExecutorRequest()
+	if type(request) == "function" then return request, "request" end
+	if type(http_request) == "function" then return http_request, "http_request" end
+	if type(http) == "table" and type(http.request) == "function" then return http.request, "http.request" end
+	if type(syn) == "table" and type(syn.request) == "function" then return syn.request, "syn.request" end
+	if type(fluxus) == "table" and type(fluxus.request) == "function" then return fluxus.request, "fluxus.request" end
+	return nil, "None found"
+end
+
+-- Detect executor clipboard function safely
+local function copyToClipboard(text)
+	local clipFn = setclipboard or toclipboard or set_clipboard or (Clipboard and Clipboard.set)
+	if type(clipFn) == "function" then
+		local ok = pcall(clipFn, tostring(text or ""))
+		return ok
+	end
+	return false
+end
+
+local ReqFunc, ReqName = getExecutorRequest()
+
+local EnteredApiKey = ""
+local BaseUrl = "https://generativelanguage.googleapis.com"
+
+local ModelOptions = {
+	"Auto (Find Working Model)",
+	"gemini-3.5-flash-lite",
+	"gemini-3.1-flash-lite",
+	"gemini-3.8-flash",
+	"gemini-3.6-flash",
+	"gemini-4-hydrogen",
+	"gemini-4-neon",
+	"gemini-4-argon"
+}
+
+local FetchedChatModels = {
+	"gemini-3.5-flash-lite",
+	"gemini-3.1-flash-lite",
+	"gemini-3.8-flash",
+	"gemini-3.6-flash",
+	"gemini-4-hydrogen",
+	"gemini-4-neon",
+	"gemini-4-argon"
+}
+
+local SelectedModel = "Auto (Find Working Model)"
+local LockedWorkingModel = "gemini-3.5-flash-lite"
+local LatestPromptText = ""
+local LatestReplyText = ""
+local AutoAnswersEnabled = false
+local AutoAnswerBusy = false
+local LastAutoAnswerTime = 0
+local LastHeardSignature = ""
+
+local HttpLabel = GeminiTab:CreateLabel("Executor HTTP: " .. ReqName)
+local ApiStatusLabel = GeminiTab:CreateLabel("Status: Paste API key and tap GEMINI OFFICIAL GOOGLE AI.")
+local ActiveModelLabel = GeminiTab:CreateLabel("Model: Auto -> " .. LockedWorkingModel)
+
+-- Non-blocking HTTP wrapper
+local function sendHttpRequest(options)
+	if not ReqFunc then
+		return nil, "Executor has no HTTP function (" .. ReqName .. ")"
+	end
+
+	local ok, res = pcall(function()
+		return ReqFunc(options)
+	end)
+
+	if ok and res then
+		return res
+	end
+	return nil, tostring(res)
+end
+
+-- Read key directly from GUI TextBox if Enter wasn't pressed
+local function findApiKeyFromGui()
+	if EnteredApiKey ~= "" then
+		return EnteredApiKey
+	end
+
+	local roots = { CoreGui }
+	pcall(function()
+		if gethui then
+			table.insert(roots, gethui())
+		end
+	end)
+
+	for _, root in ipairs(roots) do
+		for _, obj in ipairs(root:GetDescendants()) do
+			if obj:IsA("TextBox") then
+				local txt = string.match(obj.Text or "", "^%s*(.-)%s*$")
+				if string.sub(txt, 1, 4) == "AIza" and #txt >= 30 then
+					EnteredApiKey = txt
+					return txt
+				end
+			end
+		end
+	end
+
+	return ""
+end
+
+-- Filter out non-text/image/audio/embedding models
+local function isTextChatModel(modelId)
+	local lower = string.lower(modelId or "")
+	if lower == "" then return false end
+	if string.find(lower, "embedding") or string.find(lower, "tts") or string.find(lower, "image")
+		or string.find(lower, "live") or string.find(lower, "transcribe") or string.find(lower, "translate")
+		or string.find(lower, "veo") or string.find(lower, "imagen") or string.find(lower, "omni") then
+		return false
+	end
+	return string.find(lower, "gemini") ~= nil
+end
+
+-- Order models so reliable/fast ones are tried first
+local function prioritizeModels(modelsList)
+	local priority = {
+		"gemini-3.5-flash-lite",
+		"gemini-3.1-flash-lite",
+		"gemini-4-hydrogen",
+		"gemini-3.8-flash",
+		"gemini-3.6-flash",
+		"gemini-4-neon",
+		"gemini-4-argon"
+	}
+
+	local ordered = {}
+	local added = {}
+
+	for _, p in ipairs(priority) do
+		for _, m in ipairs(modelsList) do
+			if m == p and not added[m] then
+				added[m] = true
+				table.insert(ordered, m)
+			end
+		end
+	end
+
+	for _, m in ipairs(modelsList) do
+		if isTextChatModel(m) and not added[m] then
+			added[m] = true
+			table.insert(ordered, m)
+		end
+	end
+
+	return ordered
+end
+
+-- Send a prompt to a single model
+local function sendToModel(apiKey, modelId, promptText)
+	local endpoint = BaseUrl .. "/v1beta/models/" .. modelId .. ":generateContent?key=" .. apiKey
+	local payload = HttpService:JSONEncode({
+		contents = {
+			{
+				parts = {
+					{ text = promptText }
+				}
+			}
+		}
+	})
+
+	local response, err = sendHttpRequest({
+		Url = endpoint,
+		Method = "POST",
+		Headers = {
+			["Content-Type"] = "application/json"
+		},
+		Body = payload
+	})
+
+	if not response then
+		return false, "Network Error: " .. tostring(err), 0
+	end
+
+	local code = tonumber(response.StatusCode or response.Status) or 0
+	if code ~= 200 then
+		return false, "HTTP " .. tostring(code) .. " on " .. modelId, code
+	end
+
+	local ok, decoded = pcall(function()
+		return HttpService:JSONDecode(response.Body)
+	end)
+
+	if ok and decoded and decoded.candidates and decoded.candidates[1] and decoded.candidates[1].content then
+		local parts = decoded.candidates[1].content.parts
+		local replyText = (parts and parts[1] and parts[1].text) or "Empty response."
+		return true, replyText, 200
+	end
+
+	return false, "Invalid JSON response from " .. modelId, code
+end
+
+-- Find the first model from the candidate list that actually replies with HTTP 200
+local function findWorkingModel(apiKey, candidates, onStep)
+	local lastFailure = "No working model found."
+	for _, modelId in ipairs(candidates) do
+		if onStep then
+			onStep("Testing " .. modelId .. "...")
+		end
+
+		local ok, resultOrErr, code = sendToModel(apiKey, modelId, "Reply with only: OK")
+		if ok then
+			return true, modelId, resultOrErr
+		end
+
+		lastFailure = resultOrErr
+		if code == 404 or code == 503 or code == 429 then
+			task.wait(0.25)
+		else
+			return false, nil, lastFailure
+		end
+	end
+
+	return false, nil, lastFailure
+end
+
+-- Api key Input
+GeminiTab:CreateInput({
+	Name = "Api key",
+	CurrentValue = "",
+	PlaceholderText = "Paste AIza... key here",
+	RemoveTextAfterFocusLost = false,
+	Flag = "GeminiApiKeyInput",
+	Callback = function(Text)
+		EnteredApiKey = string.match(Text or "", "^%s*(.-)%s*$")
+		if EnteredApiKey ~= "" then
+			ApiStatusLabel:Set("Status: Key saved (" .. string.sub(EnteredApiKey, 1, 6) .. "...). Tap GEMINI OFFICIAL GOOGLE AI!")
+		else
+			ApiStatusLabel:Set("Status: Api key is empty.")
+		end
+	end
+})
+
+-- Model Selection Dropdown
+local ModelDropdown = GeminiTab:CreateDropdown({
+	Name = "Select Model",
+	Options = ModelOptions,
+	CurrentOption = { "Auto (Find Working Model)" },
+	MultipleOptions = false,
+	Flag = "GeminiModelDropdown",
+	Callback = function(Options)
+		local chosen = (type(Options) == "table" and Options[1]) or tostring(Options or "Auto (Find Working Model)")
+		SelectedModel = chosen
+		if chosen == "Auto (Find Working Model)" then
+			ActiveModelLabel:Set("Model: Auto -> " .. LockedWorkingModel)
+		else
+			ActiveModelLabel:Set("Model: " .. chosen)
+		end
+	end
+})
+
+-- Official Google AI Check Button
+GeminiTab:CreateButton({
+	Name = "GEMINI OFFICIAL GOOGLE AI",
+	Callback = function()
+		local keyToTest = findApiKeyFromGui()
+		if keyToTest == "" then
+			ApiStatusLabel:Set("Status: Paste an AIza... key first.")
+			Rayfield:Notify({
+				Title = "GEMINI OFFICIAL GOOGLE AI",
+				Content = "Enter your API key in the Api key box first.",
+				Duration = 3
+			})
+			return
+		end
+
+		ApiStatusLabel:Set("Status: Checking official Gemini models...")
+
+		task.spawn(function()
+			local modelsUrl = BaseUrl .. "/v1beta/models?key=" .. keyToTest
+			local response, err = sendHttpRequest({
+				Url = modelsUrl,
+				Method = "GET",
+				Headers = {
+					["Content-Type"] = "application/json"
+				}
+			})
+
+			if not response then
+				ApiStatusLabel:Set("Status: Request failed - " .. tostring(err))
+				return
+			end
+
+			local code = tonumber(response.StatusCode or response.Status) or 0
+			if code ~= 200 then
+				ApiStatusLabel:Set("Status: Invalid key (HTTP " .. tostring(code) .. ")")
+				return
+			end
+
+			local ok, decoded = pcall(function()
+				return HttpService:JSONDecode(response.Body)
+			end)
+
+			local discovered = {}
+			if ok and decoded and decoded.models then
+				for _, item in ipairs(decoded.models) do
+					local supportsGenerate = false
+					if item.supportedGenerationMethods then
+						for _, method in ipairs(item.supportedGenerationMethods) do
+							if method == "generateContent" then
+								supportsGenerate = true
+								break
+							end
+						end
+					end
+
+					if supportsGenerate and item.name then
+						local modelId = string.gsub(item.name, "^models/", "")
+						if isTextChatModel(modelId) then
+							table.insert(discovered, modelId)
+						end
+					end
+				end
+			end
+
+			local candidates = (#discovered > 0) and prioritizeModels(discovered) or prioritizeModels(FetchedChatModels)
+			FetchedChatModels = candidates
+
+			local dropdownList = { "Auto (Find Working Model)" }
+			for _, m in ipairs(candidates) do
+				table.insert(dropdownList, m)
+			end
+
+			pcall(function()
+				ModelDropdown:Refresh(dropdownList)
+				ModelDropdown:Set({ "Auto (Find Working Model)" })
+			end)
+			SelectedModel = "Auto (Find Working Model)"
+
+			local worked, workingId, failReason = findWorkingModel(keyToTest, candidates, function(stepMsg)
+				ApiStatusLabel:Set("Status: " .. stepMsg)
+			end)
+
+			if worked and workingId then
+				LockedWorkingModel = workingId
+				ActiveModelLabel:Set("Model: Auto -> " .. workingId)
+				ApiStatusLabel:Set("Status: OFFICIAL GOOGLE AI READY (" .. workingId .. ")!")
+				applySuperBlackTheme()
+				Rayfield:Notify({
+					Title = "GEMINI OFFICIAL GOOGLE AI",
+					Content = "Connected on " .. workingId .. "! Ready to chat & hear.",
+					Duration = 5
+				})
+			else
+				ApiStatusLabel:Set("Status: Failed - " .. tostring(failReason))
+			end
+		end)
+	end
+})
+
+-- ==========================================
+-- 2. GAME SENSES ("Seeing:" & "Hearing:")
+-- ==========================================
+GeminiTab:CreateSection("2. Game Senses (See & Hear)")
+
+local SeeingEnabled = false
+local ListeningEnabled = false
+local LatestSeeingSummary = "Blind / Off"
+local LatestHearingSummary = "Silence / No active audio"
+local LatestSoundName = ""
+local LatestLoudness = 0
+local LatestSoundCategory = "QUIET"
+
+local SeeingLabel = GeminiTab:CreateLabel("Seeing: Off (Toggle See to scan around you)")
+local HearingLabel = GeminiTab:CreateLabel("Hearing: Off (Toggle Listen to hear game audio)")
+
+local function classifySound(soundObj, loudness)
+	local n = string.lower((soundObj and soundObj.Name) or "")
+	local p = string.lower((soundObj and soundObj.Parent and soundObj.Parent.Name) or "")
+	local combined = n .. " " .. p
+
+	if string.find(combined, "voice") or string.find(combined, "speech") or string.find(combined, "talk")
+		or string.find(combined, "chat") or string.find(combined, "dialog") or string.find(combined, "vc")
+		or string.find(combined, "radio") or string.find(combined, "say") then
+		return "VOICE"
+	elseif loudness >= 120 then
+		return "BEAT/HIT"
+	elseif loudness >= 25 then
+		return "AUDIO"
+	elseif loudness > 1 then
+		return "SOFT"
+	end
+	return "QUIET"
+end
+
+local function isCharacterPart(inst)
+	for _, plr in ipairs(Players:GetPlayers()) do
+		if plr.Character and inst:IsDescendantOf(plr.Character) then
+			return true
+		end
+	end
+	return false
+end
+
+local function scanGameSight()
+	local localPlayer = Players.LocalPlayer
+	local char = localPlayer and localPlayer.Character
+	local root = char and char:FindFirstChild("HumanoidRootPart")
+	local hum = char and char:FindFirstChildOfClass("Humanoid")
+
+	local hpText = hum and (tostring(math.floor(hum.Health)) .. "/" .. tostring(math.floor(hum.MaxHealth))) or "N/A"
+	local posText = root and string.format("(%.0f, %.0f, %.0f)", root.Position.X, root.Position.Y, root.Position.Z) or "NoChar"
+
+	local nearbyPlayers = {}
+	for _, plr in ipairs(Players:GetPlayers()) do
+		if plr ~= localPlayer and plr.Character then
+			local pRoot = plr.Character:FindFirstChild("HumanoidRootPart")
+			if root and pRoot then
+				local dist = (pRoot.Position - root.Position).Magnitude
+				if dist <= 60 then
+					table.insert(nearbyPlayers, string.format("%s [%.0fm]", plr.Name, dist))
+				end
+			else
+				table.insert(nearbyPlayers, plr.Name)
+			end
+		end
+	end
+
+	local closestObjName = "None"
+	local closestDist = math.huge
+	local scanned = 0
+
+	if root then
+		for _, obj in ipairs(workspace:GetDescendants()) do
+			scanned += 1
+			if scanned > 650 then break end
+			if obj:IsA("BasePart") and obj.Transparency < 1 and not isCharacterPart(obj) then
+				local d = (obj.Position - root.Position).Magnitude
+				if d < closestDist and d > 0.5 then
+					closestDist = d
+					closestObjName = (obj.Parent and obj.Parent ~= workspace and obj.Parent.Name) or obj.Name
+				end
+			end
+		end
+	end
+
+	local timeOfDay = string.sub(tostring(Lighting.TimeOfDay or "12:00:00"), 1, 5)
+	local nearStr = (#nearbyPlayers > 0) and table.concat(nearbyPlayers, ", ") or "Nobody close"
+	local objStr = (closestDist < math.huge) and string.format("%s (%.0fm)", closestObjName, closestDist) or "Nothing nearby"
+
+	LatestSeeingSummary = string.format(
+		"Pos %s | HP %s | Near: %s | Object: %s | Time %s",
+		posText,
+		hpText,
+		nearStr,
+		objStr,
+		timeOfDay
+	)
+
+	SeeingLabel:Set("Seeing: " .. LatestSeeingSummary)
+end
+
+local function scanGameAudio()
+	local loudestSound = nil
+	local maxLoud = 0
+	local activeCount = 0
+
+	local roots = { workspace, SoundService }
+	local localPlayer = Players.LocalPlayer
+	if localPlayer then
+		local char = localPlayer.Character
+		local pGui = localPlayer:FindFirstChildOfClass("PlayerGui")
+		if char then table.insert(roots, char) end
+		if pGui then table.insert(roots, pGui) end
+	end
+
+	for _, root in ipairs(roots) do
+		for _, obj in ipairs(root:GetDescendants()) do
+			if obj:IsA("Sound") and obj.IsPlaying then
+				activeCount += 1
+				local loud = tonumber(obj.PlaybackLoudness) or 0
+				if loud > maxLoud then
+					maxLoud = loud
+					loudestSound = obj
+				end
+			end
+		end
+	end
+
+	if loudestSound then
+		local rounded = math.floor(maxLoud + 0.5)
+		local pulseTag = classifySound(loudestSound, rounded)
+		LatestSoundName = loudestSound.Name
+		LatestLoudness = rounded
+		LatestSoundCategory = pulseTag
+		LatestHearingSummary = string.format(
+			"%s (%s) | Loudness: %d | Active: %d",
+			loudestSound.Name,
+			pulseTag,
+			rounded,
+			activeCount
+		)
+	else
+		LatestSoundName = ""
+		LatestLoudness = 0
+		LatestSoundCategory = "QUIET"
+		LatestHearingSummary = string.format("Quiet (Active sounds: %d)", activeCount)
+	end
+
+	HearingLabel:Set("Hearing: " .. LatestHearingSummary)
+end
+
+GeminiTab:CreateToggle({
+	Name = "See (Scan Around You)",
+	CurrentValue = false,
+	Flag = "GeminiSeeToggle",
+	Callback = function(Value)
+		SeeingEnabled = Value
+		if Value then
+			SeeingLabel:Set("Seeing: Scanning surroundings...")
+			pcall(scanGameSight)
+		else
+			SeeingLabel:Set("Seeing: Paused (" .. LatestSeeingSummary .. ")")
+		end
+	end
+})
+
+GeminiTab:CreateToggle({
+	Name = "Listen (Hear Game Audio)",
+	CurrentValue = false,
+	Flag = "GeminiListenToggle",
+	Callback = function(Value)
+		ListeningEnabled = Value
+		if Value then
+			HearingLabel:Set("Hearing: Scanning game sounds...")
+			pcall(scanGameAudio)
+		else
+			HearingLabel:Set("Hearing: Paused (" .. LatestHearingSummary .. ")")
+		end
+	end
+})
+
+-- ==========================================
+-- 3. ASK GEMINI, AUTO ANSWERS, CLEAR & COPY
+-- ==========================================
+GeminiTab:CreateSection("3. Ask GEMINI OFFICIAL GOOGLE AI")
+
+local ResponseParagraph = GeminiTab:CreateParagraph({
+	Title = "Gemini Response",
+	Content = "Type your prompt with your keyboard and press Enter (or tap Send Prompt), or turn on Auto Answers."
+})
+
+local function submitPromptToGemini(rawPrompt, isAuto)
+	local cleanPrompt = string.match(rawPrompt or "", "^%s*(.-)%s*$")
+	if cleanPrompt == "" then return end
+
+	if not isAuto then
+		LatestPromptText = cleanPrompt
+	end
+
+	local keyToUse = findApiKeyFromGui()
+	if keyToUse == "" then
+		if not isAuto then
+			ResponseParagraph:Set({
+				Title = "Gemini Response",
+				Content = "Please paste your Api key above and tap GEMINI OFFICIAL GOOGLE AI first."
+			})
+		end
+		return
+	end
+
+	local modelToUse = (SelectedModel == "Auto (Find Working Model)") and LockedWorkingModel or SelectedModel
+	if not isAuto then
+		ResponseParagraph:Set({
+			Title = "Gemini Response (" .. modelToUse .. ")",
+			Content = "Thinking..."
+		})
+	end
+
+	task.spawn(function()
+		if isAuto then
+			AutoAnswerBusy = true
+		end
+
+		local ok, replyOrErr = sendToModel(keyToUse, modelToUse, cleanPrompt)
+		if ok then
+			LatestReplyText = replyOrErr
+			ResponseParagraph:Set({
+				Title = (isAuto and "Auto Answer (" or "Gemini Response (") .. modelToUse .. ")",
+				Content = replyOrErr
+			})
+		elseif not isAuto then
+			LatestReplyText = replyOrErr
+			ResponseParagraph:Set({
+				Title = "Gemini Response Error",
+				Content = replyOrErr
+			})
+		end
+
+		if isAuto then
+			AutoAnswerBusy = false
+		end
+	end)
+end
+
+-- Trigger automatic answer when Hearing: detects a voice or audio spike while Listen & Auto Answers are active
+local function checkAutoAnswerFromHearing()
+	if not AutoAnswersEnabled or not ListeningEnabled or AutoAnswerBusy then
+		return
+	end
+	if LatestLoudness < 15 then
+		return
+	end
+
+	local now = os.clock()
+	if (now - LastAutoAnswerTime) < 6 then
+		return
+	end
+
+	local sig = tostring(LatestSoundName) .. ":" .. tostring(LatestSoundCategory)
+	if sig == LastHeardSignature and (now - LastAutoAnswerTime) < 12 then
+		return
+	end
+
+	LastAutoAnswerTime = now
+	LastHeardSignature = sig
+
+	local autoPrompt = string.format(
+		"In the game, Hearing detected: %s. Briefly explain what it likely is and how it sounds or works in 1 or 2 short sentences.",
+		LatestHearingSummary
+	)
+	submitPromptToGemini(autoPrompt, true)
+end
+
+GeminiTab:CreateToggle({
+	Name = "Auto Answers",
+	CurrentValue = false,
+	Flag = "GeminiAutoAnswersToggle",
+	Callback = function(Value)
+		AutoAnswersEnabled = Value
+		LastAutoAnswer
